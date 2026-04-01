@@ -285,6 +285,11 @@ impl RuntimeConfig {
     }
 
     #[must_use]
+    pub fn get_string(&self, key: &str) -> Option<&str> {
+        self.get(key).and_then(JsonValue::as_str)
+    }
+
+    #[must_use]
     pub fn as_json(&self) -> JsonValue {
         JsonValue::Object(self.merged.clone())
     }

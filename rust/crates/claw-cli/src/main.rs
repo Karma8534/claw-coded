@@ -16,7 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use api::{
-    resolve_startup_auth_source, ClawApiClient, AuthSource, ContentBlockDelta, InputContentBlock,
+    resolve_startup_auth_source, AuthSource, ClawApiClient, ContentBlockDelta, InputContentBlock,
     InputMessage, MessageRequest, MessageResponse, OutputContentBlock,
     StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition, ToolResultContentBlock,
 };
@@ -828,7 +828,7 @@ fn run_resume_command(
     match command {
         SlashCommand::Help => Ok(ResumeCommandOutcome {
             session: session.clone(),
-            message: Some(render_repl_help()),
+            message: Some(render_repl_help(resolve_editor_mode())),
         }),
         SlashCommand::Compact => {
             let result = runtime::compact_session(
@@ -881,6 +881,7 @@ fn run_resume_command(
                         estimated_tokens: 0,
                     },
                     default_permission_mode().as_str(),
+                    resolve_editor_mode().label(),
                     &status_context(Some(session_path))?,
                 )),
             })
@@ -960,28 +961,29 @@ fn run_repl(
     permission_mode: PermissionMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut cli = LiveCli::new(model, true, allowed_tools, permission_mode)?;
-    let mut editor = input::LineEditor::new("> ", slash_command_completion_candidates());
+    let mut editor =
+        input::LineEditor::new("> ", slash_command_completion_candidates(), cli.editor_mode);
     println!("{}", cli.startup_banner());
 
     loop {
         match editor.read_line()? {
             input::ReadOutcome::Submit(input) => {
-                let trimmed = input.trim().to_string();
+                let trimmed = input.trim();
                 if trimmed.is_empty() {
                     continue;
                 }
-                if matches!(trimmed.as_str(), "/exit" | "/quit") {
+                if matches!(trimmed, "/exit" | "/quit") {
                     cli.persist_session()?;
                     break;
                 }
-                if let Some(command) = SlashCommand::parse(&trimmed) {
+                if let Some(command) = SlashCommand::parse(trimmed) {
                     if cli.handle_repl_command(command)? {
                         cli.persist_session()?;
                     }
                     continue;
                 }
-                editor.push_history(input);
-                cli.run_turn(&trimmed)?;
+                editor.push_history(&input);
+                cli.run_turn(&input)?;
             }
             input::ReadOutcome::Cancel => {}
             input::ReadOutcome::Exit => {
@@ -1012,6 +1014,7 @@ struct LiveCli {
     model: String,
     allowed_tools: Option<AllowedToolSet>,
     permission_mode: PermissionMode,
+    editor_mode: input::EditorMode,
     system_prompt: Vec<String>,
     runtime: ConversationRuntime<DefaultRuntimeClient, CliToolExecutor>,
     session: SessionHandle,
@@ -1025,6 +1028,7 @@ impl LiveCli {
         permission_mode: PermissionMode,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let system_prompt = build_system_prompt()?;
+        let editor_mode = resolve_editor_mode();
         let session = create_managed_session_handle()?;
         let runtime = build_runtime(
             Session::new(),
@@ -1040,6 +1044,7 @@ impl LiveCli {
             model,
             allowed_tools,
             permission_mode,
+            editor_mode,
             system_prompt,
             runtime,
             session,
@@ -1060,14 +1065,16 @@ impl LiveCli {
 ██║     ██║     ███████║██║ █╗ ██║\n\
 ██║     ██║     ██╔══██║██║███╗██║\n\
 ╚██████╗███████╗██║  ██║╚███╔███╔╝\n\
- ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝\x1b[0m \x1b[38;5;208mCode\x1b[0m 🦞\n\n\
+╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝\x1b[0m \x1b[38;5;208mCode\x1b[0m 🦞\n\n\
   \x1b[2mModel\x1b[0m            {}\n\
   \x1b[2mPermissions\x1b[0m      {}\n\
+  \x1b[2mInput mode\x1b[0m       {}\n\
   \x1b[2mDirectory\x1b[0m        {}\n\
   \x1b[2mSession\x1b[0m          {}\n\n\
-  Type \x1b[1m/help\x1b[0m for commands · \x1b[2mShift+Enter\x1b[0m for newline",
+  Type \x1b[1m/help\x1b[0m for commands · \x1b[1m/exit\x1b[0m to quit · \x1b[2mShift+Enter\x1b[0m for newline",
             self.model,
             self.permission_mode.as_str(),
+            self.editor_mode.label(),
             cwd,
             self.session.id,
         )
@@ -1157,7 +1164,7 @@ impl LiveCli {
     ) -> Result<bool, Box<dyn std::error::Error>> {
         Ok(match command {
             SlashCommand::Help => {
-                println!("{}", render_repl_help());
+                println!("{}", render_repl_help(self.editor_mode));
                 false
             }
             SlashCommand::Status => {
@@ -1243,7 +1250,7 @@ impl LiveCli {
                 false
             }
             SlashCommand::Unknown(name) => {
-                eprintln!("unknown slash command: /{name}");
+                println!("{}", render_unknown_repl_command(&name));
                 false
             }
         })
@@ -1269,6 +1276,7 @@ impl LiveCli {
                     estimated_tokens: self.runtime.estimated_tokens(),
                 },
                 self.permission_mode.as_str(),
+                self.editor_mode.label(),
                 &status_context(Some(&self.session.path)).expect("status context should load"),
             )
         );
@@ -1849,22 +1857,24 @@ fn render_session_list(active_session_id: &str) -> Result<String, Box<dyn std::e
     Ok(lines.join("\n"))
 }
 
-fn render_repl_help() -> String {
-    [
+fn render_repl_help(editor_mode: input::EditorMode) -> String {
+    let mut lines = vec![
         "REPL".to_string(),
+        format!("  Input mode           {}", editor_mode.label()),
         "  /exit                Quit the REPL".to_string(),
         "  /quit                Quit the REPL".to_string(),
         "  Up/Down              Navigate prompt history".to_string(),
         "  Tab                  Complete slash commands".to_string(),
         "  Ctrl-C               Clear input (or exit on empty prompt)".to_string(),
         "  Shift+Enter/Ctrl+J   Insert a newline".to_string(),
-        String::new(),
-        render_slash_command_help(),
-    ]
-    .join(
-        "
-",
-    )
+    ];
+    if editor_mode == input::EditorMode::Vim {
+        lines.push("  Esc                  Switch to normal mode".to_string());
+        lines.push("  i / a                Return to insert mode".to_string());
+    }
+    lines.push(String::new());
+    lines.push(render_slash_command_help());
+    lines.join("\n")
 }
 
 fn status_context(
@@ -1892,6 +1902,7 @@ fn format_status_report(
     model: &str,
     usage: StatusUsage,
     permission_mode: &str,
+    editor_mode: &str,
     context: &StatusContext,
 ) -> String {
     [
@@ -1899,6 +1910,7 @@ fn format_status_report(
             "Status
   Model            {model}
   Permission mode  {permission_mode}
+  Input mode       {editor_mode}
   Messages         {}
   Turns            {}
   Estimated tokens {}",
@@ -2037,8 +2049,7 @@ fn render_memory_report() -> Result<String, Box<dyn std::error::Error>> {
     if project_context.instruction_files.is_empty() {
         lines.push("Discovered files".to_string());
         lines.push(
-            "  No CLAW instruction files discovered in the current directory ancestry."
-                .to_string(),
+            "  No CLAW instruction files discovered in the current directory ancestry.".to_string(),
         );
     } else {
         lines.push("Discovered files".to_string());
@@ -2790,7 +2801,8 @@ fn build_runtime(
     allowed_tools: Option<AllowedToolSet>,
     permission_mode: PermissionMode,
     progress_reporter: Option<InternalPromptProgressReporter>,
-) -> Result<ConversationRuntime<DefaultRuntimeClient, CliToolExecutor>, Box<dyn std::error::Error>> {
+) -> Result<ConversationRuntime<DefaultRuntimeClient, CliToolExecutor>, Box<dyn std::error::Error>>
+{
     let (feature_config, tool_registry) = build_runtime_plugin_state()?;
     Ok(ConversationRuntime::new_with_features(
         session,
@@ -3101,7 +3113,7 @@ fn collect_tool_results(summary: &runtime::TurnSummary) -> Vec<serde_json::Value
 }
 
 fn slash_command_completion_candidates() -> Vec<String> {
-    slash_command_specs()
+    let mut candidates = slash_command_specs()
         .iter()
         .flat_map(|spec| {
             std::iter::once(spec.name)
@@ -3109,7 +3121,88 @@ fn slash_command_completion_candidates() -> Vec<String> {
                 .map(|name| format!("/{name}"))
                 .collect::<Vec<_>>()
         })
+        .collect::<Vec<_>>();
+    candidates.extend([String::from("/exit"), String::from("/quit")]);
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+fn resolve_editor_mode() -> input::EditorMode {
+    let cwd = match env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(_) => return input::EditorMode::Emacs,
+    };
+    let loader = ConfigLoader::default_for(cwd);
+    loader
+        .load()
+        .ok()
+        .map(|config| input::EditorMode::from_config_value(config.get_string("editorMode")))
+        .unwrap_or(input::EditorMode::Emacs)
+}
+
+fn render_unknown_repl_command(name: &str) -> String {
+    let suggestions = suggest_repl_commands(name);
+    let mut lines = vec![format!("Unknown slash command: /{name}")];
+    if !suggestions.is_empty() {
+        lines.push(format!("  Did you mean {}?", suggestions.join(", ")));
+    }
+    lines.push("  Type /help to list available commands.".to_string());
+    lines.join("\n")
+}
+
+fn suggest_repl_commands(name: &str) -> Vec<String> {
+    let normalized = name.trim().trim_start_matches('/').to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+
+    let mut ranked = slash_command_completion_candidates()
+        .into_iter()
+        .filter_map(|candidate| {
+            let raw = candidate.trim_start_matches('/').to_ascii_lowercase();
+            let distance = edit_distance(&normalized, &raw);
+            let prefix_match = raw.starts_with(&normalized) || normalized.starts_with(&raw);
+            let near_match = distance <= 2;
+            (prefix_match || near_match).then_some((distance, candidate))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort();
+    ranked.dedup_by(|left, right| left.1 == right.1);
+    ranked
+        .into_iter()
+        .map(|(_, candidate)| candidate)
+        .take(3)
         .collect()
+}
+
+fn edit_distance(left: &str, right: &str) -> usize {
+    if left == right {
+        return 0;
+    }
+    if left.is_empty() {
+        return right.chars().count();
+    }
+    if right.is_empty() {
+        return left.chars().count();
+    }
+
+    let right_chars = right.chars().collect::<Vec<_>>();
+    let mut previous = (0..=right_chars.len()).collect::<Vec<_>>();
+    let mut current = vec![0; right_chars.len() + 1];
+
+    for (left_index, left_char) in left.chars().enumerate() {
+        current[0] = left_index + 1;
+        for (right_index, right_char) in right_chars.iter().enumerate() {
+            let substitution_cost = usize::from(left_char != *right_char);
+            current[right_index + 1] = (previous[right_index + 1] + 1)
+                .min(current[right_index] + 1)
+                .min(previous[right_index] + substitution_cost);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+
+    previous[right_chars.len()]
 }
 
 fn format_tool_call_start(name: &str, input: &str) -> String {
@@ -3816,10 +3909,12 @@ mod tests {
         format_status_report, format_tool_call_start, format_tool_result,
         normalize_permission_mode, parse_args, parse_git_status_metadata, permission_policy,
         print_help_to, push_output_block, render_config_report, render_memory_report,
-        render_repl_help, resolve_model_alias, response_to_events, resume_supported_slash_commands,
-        status_context, CliAction, CliOutputFormat, InternalPromptProgressEvent,
-        InternalPromptProgressState, SlashCommand, StatusUsage, DEFAULT_MODEL,
+        render_repl_help, render_unknown_repl_command, resolve_model_alias, response_to_events,
+        resume_supported_slash_commands, slash_command_completion_candidates, status_context,
+        CliAction, CliOutputFormat, InternalPromptProgressEvent, InternalPromptProgressState,
+        SlashCommand, StatusUsage, DEFAULT_MODEL,
     };
+    use crate::input::EditorMode;
     use api::{MessageResponse, OutputContentBlock, Usage};
     use plugins::{PluginTool, PluginToolDefinition, PluginToolPermission};
     use runtime::{AssistantEvent, ContentBlock, ConversationMessage, MessageRole, PermissionMode};
@@ -4131,13 +4226,14 @@ mod tests {
     fn shared_help_uses_resume_annotation_copy() {
         let help = commands::render_slash_command_help();
         assert!(help.contains("Slash commands"));
-        assert!(help.contains("works with --resume SESSION.json"));
+        assert!(help.contains("available via claw --resume SESSION.json"));
     }
 
     #[test]
     fn repl_help_includes_shared_commands_and_exit() {
-        let help = render_repl_help();
+        let help = render_repl_help(EditorMode::Emacs);
         assert!(help.contains("REPL"));
+        assert!(help.contains("Input mode           emacs"));
         assert!(help.contains("/help"));
         assert!(help.contains("/status"));
         assert!(help.contains("/model [model]"));
@@ -4159,6 +4255,30 @@ mod tests {
         assert!(help.contains("/agents"));
         assert!(help.contains("/skills"));
         assert!(help.contains("/exit"));
+    }
+
+    #[test]
+    fn repl_help_includes_vim_key_hints_in_vim_mode() {
+        let help = render_repl_help(EditorMode::Vim);
+        assert!(help.contains("Input mode           vim"));
+        assert!(help.contains("Esc                  Switch to normal mode"));
+        assert!(help.contains("i / a                Return to insert mode"));
+    }
+
+    #[test]
+    fn completion_candidates_include_repl_exit_commands() {
+        let candidates = slash_command_completion_candidates();
+        assert!(candidates.contains(&"/exit".to_string()));
+        assert!(candidates.contains(&"/quit".to_string()));
+        assert!(candidates.contains(&"/help".to_string()));
+    }
+
+    #[test]
+    fn unknown_repl_command_reports_helpful_suggestions() {
+        let rendered = render_unknown_repl_command("statu");
+        assert!(rendered.contains("Unknown slash command: /statu"));
+        assert!(rendered.contains("/status"));
+        assert!(rendered.contains("Type /help"));
     }
 
     #[test]
@@ -4283,6 +4403,7 @@ mod tests {
                 estimated_tokens: 128,
             },
             "workspace-write",
+            "vim",
             &super::StatusContext {
                 cwd: PathBuf::from("/tmp/project"),
                 session_path: Some(PathBuf::from("session.json")),
@@ -4296,6 +4417,7 @@ mod tests {
         assert!(status.contains("Status"));
         assert!(status.contains("Model            sonnet"));
         assert!(status.contains("Permission mode  workspace-write"));
+        assert!(status.contains("Input mode       vim"));
         assert!(status.contains("Messages         7"));
         assert!(status.contains("Latest total     10"));
         assert!(status.contains("Cumulative total 31"));
@@ -4438,7 +4560,7 @@ mod tests {
     }
     #[test]
     fn repl_help_mentions_history_completion_and_multiline() {
-        let help = render_repl_help();
+        let help = render_repl_help(EditorMode::Emacs);
         assert!(help.contains("Up/Down"));
         assert!(help.contains("Tab"));
         assert!(help.contains("Shift+Enter/Ctrl+J"));

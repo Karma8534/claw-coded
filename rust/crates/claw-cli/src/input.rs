@@ -19,6 +19,38 @@ pub enum ReadOutcome {
     Exit,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorMode {
+    Emacs,
+    Vim,
+}
+
+impl EditorMode {
+    #[must_use]
+    pub fn from_config_value(value: Option<&str>) -> Self {
+        match value {
+            Some("vim") => Self::Vim,
+            Some("emacs") | Some("default") | None => Self::Emacs,
+            Some(_) => Self::Emacs,
+        }
+    }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Emacs => "emacs",
+            Self::Vim => "vim",
+        }
+    }
+
+    const fn rustyline_mode(self) -> EditMode {
+        match self {
+            Self::Emacs => EditMode::Emacs,
+            Self::Vim => EditMode::Vi,
+        }
+    }
+}
+
 struct SlashCommandHelper {
     completions: Vec<String>,
     current_line: RefCell<String>,
@@ -100,10 +132,10 @@ pub struct LineEditor {
 
 impl LineEditor {
     #[must_use]
-    pub fn new(prompt: impl Into<String>, completions: Vec<String>) -> Self {
+    pub fn new(prompt: impl Into<String>, completions: Vec<String>, mode: EditorMode) -> Self {
         let config = Config::builder()
             .completion_type(CompletionType::List)
-            .edit_mode(EditMode::Emacs)
+            .edit_mode(mode.rustyline_mode())
             .build();
         let mut editor = Editor::<SlashCommandHelper, DefaultHistory>::with_config(config)
             .expect("rustyline editor should initialize");
@@ -201,7 +233,7 @@ fn slash_command_prefix(line: &str, pos: usize) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{slash_command_prefix, LineEditor, SlashCommandHelper};
+    use super::{slash_command_prefix, EditorMode, LineEditor, SlashCommandHelper};
     use rustyline::completion::Completer;
     use rustyline::highlight::Highlighter;
     use rustyline::history::{DefaultHistory, History};
@@ -260,10 +292,28 @@ mod tests {
 
     #[test]
     fn push_history_ignores_blank_entries() {
-        let mut editor = LineEditor::new("> ", vec!["/help".to_string()]);
+        let mut editor = LineEditor::new("> ", vec!["/help".to_string()], EditorMode::Emacs);
         editor.push_history("   ");
         editor.push_history("/help");
 
         assert_eq!(editor.editor.history().len(), 1);
+    }
+
+    #[test]
+    fn resolves_editor_mode_from_config_values() {
+        assert_eq!(EditorMode::from_config_value(Some("vim")), EditorMode::Vim);
+        assert_eq!(
+            EditorMode::from_config_value(Some("emacs")),
+            EditorMode::Emacs
+        );
+        assert_eq!(
+            EditorMode::from_config_value(Some("default")),
+            EditorMode::Emacs
+        );
+        assert_eq!(
+            EditorMode::from_config_value(Some("wat")),
+            EditorMode::Emacs
+        );
+        assert_eq!(EditorMode::from_config_value(None), EditorMode::Emacs);
     }
 }

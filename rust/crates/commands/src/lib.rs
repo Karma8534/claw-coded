@@ -389,34 +389,32 @@ pub fn resume_supported_slash_commands() -> Vec<&'static SlashCommandSpec> {
 pub fn render_slash_command_help() -> String {
     let mut lines = vec![
         "Slash commands".to_string(),
-        "  [resume] means the command also works with --resume SESSION.json".to_string(),
+        "  [resume] = also available via claw --resume SESSION.json".to_string(),
     ];
     for spec in slash_command_specs() {
         let name = match spec.argument_hint {
             Some(argument_hint) => format!("/{} {}", spec.name, argument_hint),
             None => format!("/{}", spec.name),
         };
-        let alias_suffix = if spec.aliases.is_empty() {
-            String::new()
-        } else {
-            format!(
-                " (aliases: {})",
-                spec.aliases
-                    .iter()
-                    .map(|alias| format!("/{alias}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        };
-        let resume = if spec.resume_supported {
-            " [resume]"
-        } else {
-            ""
-        };
-        lines.push(format!(
-            "  {name:<20} {}{alias_suffix}{resume}",
-            spec.summary
-        ));
+        lines.push(format!("  {name}"));
+        lines.push(format!("      {}", spec.summary));
+        if !spec.aliases.is_empty() || spec.resume_supported {
+            let mut details = Vec::new();
+            if !spec.aliases.is_empty() {
+                details.push(format!(
+                    "aliases: {}",
+                    spec.aliases
+                        .iter()
+                        .map(|alias| format!("/{alias}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            if spec.resume_supported {
+                details.push("[resume]".to_string());
+            }
+            lines.push(format!("      {}", details.join(" · ")));
+        }
     }
     lines.join("\n")
 }
@@ -1413,7 +1411,7 @@ mod tests {
     #[test]
     fn renders_help_from_shared_specs() {
         let help = render_slash_command_help();
-        assert!(help.contains("works with --resume SESSION.json"));
+        assert!(help.contains("available via claw --resume SESSION.json"));
         assert!(help.contains("/help"));
         assert!(help.contains("/status"));
         assert!(help.contains("/compact"));

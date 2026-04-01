@@ -2,7 +2,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 use crate::args::{OutputFormat, PermissionMode};
-use crate::input::{LineEditor, ReadOutcome};
+use crate::input::{EditorMode, LineEditor, ReadOutcome};
 use crate::render::{Spinner, TerminalRenderer};
 use runtime::{ConversationClient, ConversationMessage, RuntimeError, StreamEvent, UsageSummary};
 
@@ -111,7 +111,7 @@ impl CliApp {
     }
 
     pub fn run_repl(&mut self) -> io::Result<()> {
-        let mut editor = LineEditor::new("› ", Vec::new());
+        let mut editor = LineEditor::new("› ", Vec::new(), EditorMode::Emacs);
         println!("Claw Code interactive mode");
         println!("Type /help for commands. Shift+Enter or Ctrl+J inserts a newline.");
 
